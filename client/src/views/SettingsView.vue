@@ -55,8 +55,14 @@ async function signOut() {
   await logout();
   router.push("/login");
 }
+// Two taps, like deleting an order.
+const resetArmed = ref(false);
 async function resetDemo() {
-  if (!confirm("Delete everything in this preview and start again with the demo shop?")) return;
+  if (!resetArmed.value) {
+    resetArmed.value = true;
+    setTimeout(() => (resetArmed.value = false), 4000);
+    return;
+  }
   const { resetPreview } = await import("../lib/demoApi.js");
   resetPreview();
   location.reload();
@@ -114,7 +120,7 @@ async function resetDemo() {
     <div class="card-head"><h2>Account</h2></div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button type="button" class="btn btn-ghost" @click="signOut"><Icon name="logout" />Log out</button>
-      <button v-if="isPreview" type="button" class="btn btn-danger" @click="resetDemo">Reset preview data</button>
+      <button v-if="isPreview" type="button" class="btn btn-danger" @click="resetDemo">{{ resetArmed ? "Tap again: erase and start over" : "Reset preview data" }}</button>
     </div>
   </section>
 </template>

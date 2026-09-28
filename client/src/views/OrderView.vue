@@ -60,8 +60,16 @@ async function move(status, extra = {}) {
   }
 }
 
+// Deleting takes two taps: the first arms the button for a few seconds.
+const armed = ref(false);
+let armTimer;
 async function remove() {
-  if (!confirm(`Delete order #${order.value.number}? This can't be undone.`)) return;
+  if (!armed.value) {
+    armed.value = true;
+    clearTimeout(armTimer);
+    armTimer = setTimeout(() => (armed.value = false), 4000);
+    return;
+  }
   await api("DELETE", `/orders/${order.value.id}`);
   refreshCounts();
   toast(`Order #${order.value.number} deleted`);
@@ -105,7 +113,7 @@ const failed = computed(() => ["returned", "cancelled"].includes(order.value?.st
       </div>
       <div style="display:flex;gap:8px">
         <RouterLink :to="`/orders/${order.id}/edit`" class="btn btn-ghost btn-sm"><Icon name="edit" />Edit</RouterLink>
-        <button type="button" class="btn btn-danger btn-sm" @click="remove"><Icon name="trash" />Delete</button>
+        <button type="button" class="btn btn-danger btn-sm" @click="remove"><Icon name="trash" />{{ armed ? "Tap again to delete" : "Delete" }}</button>
       </div>
     </div>
 
