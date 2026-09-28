@@ -1,0 +1,20 @@
+{
+  "name": "sauda",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sauda: order manager for Instagram, Facebook and WhatsApp sellers (cash on delivery, Pakistan)",
+  "workspaces": ["client", "server"],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
+    "build": "npm run build -w client",
+    "build:preview": "npm run build:preview -w client",
+    "start": "NODE_ENV=production npm start -w server",
+    "test": "npm test -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
