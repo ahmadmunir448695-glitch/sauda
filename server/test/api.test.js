@@ -203,3 +203,150 @@ test("settings update the shop name and message templates", async () => {
   const o = (await api("POST", "/orders", order())).body;
   assert.equal(fillTemplate(r.body.user.templates.confirm, o, "Sana Studio"), "Hi Ayesha, order #1001 = Rs 7,250");
 });
+
+// ---------- Stock and cost ----------
+const product = (over = {}) => ({ name: "Lawn suit", price: 3500, cost: 2000, stock: 10, lowStock: 3, ...over });
+const stockOf = async (api, id) => (await api("GET", `/products/${id}`)).body.stock;
+
+test("products check their fields and names are unique per seller", async () => {
+  const api = await seller();
+  const bad = await api("POST", "/products", { name: "", price: "", cost: -5, stock: 2.5 });
+  assert.equal(bad.status, 400);
+  for (const f of ["name", "price", "cost", "stock"]) assert.ok(bad.body.fields[f], f);
+
+  const p = await api("POST", "/products", product());
+  assert.equal(p.status, 201);
+  assert.equal(p.body.stock, 10);
+  assert.equal(p.body.level, "ok");
+  assert.deepEqual(p.body.moves.map((m) => [m.reason, m.change]), [["start", 10]]);
+
+  assert.ok((await api("POST", "/products", product({ name: " lawn  SUIT " }))).body.fields.name);
+  const other = (await api("POST", "/products", product({ name: "Dupatta" }))).body;
+  assert.equal((await api("PUT", `/products/${other.id}`, product({ name: "Lawn suit" }))).status, 400);
+
+  // Editing changes the details but never the stock count.
+  const edited = (await api("PUT", `/products/${p.body.id}`, product({ price: 3800, stock: 999 }))).body;
+  assert.equal(edited.price, 3800);
+  assert.equal(edited.stock, 10);
+
+  const list = (await api("GET", "/products")).body;
+  assert.deepEqual(list.map((x) => x.name), ["Dupatta", "Lawn suit"]);
+  assert.equal(list[0].moves, undefined, "the list leaves out the stock log");
+
+  assert.equal((await api("DELETE", `/products/${other.id}`)).status, 200);
+  assert.equal((await api("GET", `/products/${other.id}`)).status, 404);
+});
+
+test("sellers only see and change their own products", async () => {
+  const a = await seller();
+  const b = await seller();
+  const p = (await a("POST", "/products", product())).body;
+  assert.equal((await b("GET", "/products")).body.length, 0);
+  assert.equal((await b("GET", `/products/${p.id}`)).status, 404);
+  assert.equal((await b("PUT", `/products/${p.id}`, product())).status, 404);
+  assert.equal((await b("POST", `/products/${p.id}/stock`, { add: 5 })).status, 404);
+  assert.equal((await b("DELETE", `/products/${p.id}`)).status, 404);
+  assert.equal((await b("POST", "/products", product())).status, 201, "names are unique per seller only");
+
+  // Another seller's product id on an order is ignored: no link, no cost, no stock taken.
+  const o = (await b("POST", "/orders", order({ items: [{ name: "Lawn suit", qty: 2, price: 3500, productId: p.id }] }))).body;
+  assert.equal(o.items[0].productId, undefined);
+  assert.equal(o.items[0].cost, undefined);
+  assert.equal(await stockOf(a, p.id), 10);
+});
+
+test("receiving, taking out and counting stock are logged", async () => {
+  const api = await seller();
+  const p = (await api("POST", "/products", product({ stock: 4 }))).body;
+  assert.equal((await api("POST", `/products/${p.id}/stock`, { add: 0 })).status, 400);
+  assert.equal((await api("POST", `/products/${p.id}/stock`, { count: -1 })).status, 400);
+
+  assert.equal((await api("POST", `/products/${p.id}/stock`, { add: 6 })).body.stock, 10);
+  assert.equal((await api("POST", `/products/${p.id}/stock`, { add: -2 })).body.stock, 8);
+  const counted = (await api("POST", `/products/${p.id}/stock`, { count: 2 })).body;
+  assert.equal(counted.stock, 2);
+  assert.equal(counted.level, "low");
+  assert.deepEqual(
+    counted.moves.map((m) => [m.reason, m.change, m.stock]),
+    [["count", -6, 2], ["remove", -2, 8], ["restock", 6, 10], ["start", 4, 4]]
+  );
+  assert.equal((await api("POST", `/products/${p.id}/stock`, { count: 0 })).body.level, "out");
+});
+
+test("orders take stock and give it back when cancelled, returned, edited or deleted", async () => {
+  const api = await seller();
+  const p = (await api("POST", "/products", product())).body;
+  const items = (qty) => [{ name: "Lawn suit", qty, price: 3500, productId: p.id }, { name: "Gift wrap", qty: 1, price: 100 }];
+
+  const o = (await api("POST", "/orders", order({ items: items(2) }))).body;
+  assert.equal(o.items[0].cost, 2000, "the order keeps the cost from the day it was placed");
+  assert.equal(o.items[1].productId, undefined);
+  assert.equal(await stockOf(api, p.id), 8);
+
+  await api("PATCH", `/orders/${o.id}`, { status: "confirmed" });
+  assert.equal(await stockOf(api, p.id), 8, "moving along doesn't take stock twice");
+  await api("PATCH", `/orders/${o.id}`, { status: "cancelled" });
+  assert.equal(await stockOf(api, p.id), 10);
+  await api("PATCH", `/orders/${o.id}`, { status: "new" });
+  assert.equal(await stockOf(api, p.id), 8, "reopening takes it again");
+
+  // A later cost change doesn't rewrite this order's cost, even when it is edited.
+  await api("PUT", `/products/${p.id}`, product({ cost: 2500 }));
+  const edited = (await api("PUT", `/orders/${o.id}`, order({ items: items(5) }))).body;
+  assert.equal(edited.items[0].cost, 2000);
+  assert.equal(await stockOf(api, p.id), 5);
+
+  await api("PATCH", `/orders/${o.id}`, { status: "shipped" });
+  await api("PATCH", `/orders/${o.id}`, { status: "returned" });
+  assert.equal(await stockOf(api, p.id), 10, "a returned parcel comes back to stock");
+  await api("PATCH", `/orders/${o.id}`, { status: "delivered" });
+  assert.equal(await stockOf(api, p.id), 5);
+
+  await api("DELETE", `/orders/${o.id}`);
+  const after = (await api("GET", `/products/${p.id}`)).body;
+  assert.equal(after.stock, 10);
+  assert.ok(after.moves.some((m) => m.reason === "order" && m.number === o.number));
+
+  // Selling more than is in stock is allowed (pre-orders) and shows as out of stock.
+  await api("POST", "/orders", order({ items: items(12) }));
+  const oversold = (await api("GET", `/products/${p.id}`)).body;
+  assert.equal(oversold.stock, -2);
+  assert.equal(oversold.level, "out");
+  assert.equal(oversold.sold30, 12);
+
+  // Orders keep the item after its product is deleted.
+  await api("DELETE", `/products/${p.id}`);
+  const kept = (await api("GET", "/orders")).body[0];
+  assert.equal(kept.items[0].cost, 2500, "placed after the cost went up");
+  assert.equal((await api("PATCH", `/orders/${kept.id}`, { status: "cancelled" })).status, 200);
+});
+
+test("dashboard shows this month's profit and low stock", async () => {
+  const api = await seller();
+  assert.equal((await api("PUT", "/settings", { shop: "Sana", name: "Sana", courierCharge: -1, templates: DEFAULT_TEMPLATES })).status, 400);
+  const s = await api("PUT", "/settings", { shop: "Sana", name: "Sana", courierCharge: "200", templates: DEFAULT_TEMPLATES });
+  assert.equal(s.body.user.courierCharge, 200);
+
+  const suit = (await api("POST", "/products", product({ stock: 5 }))).body;
+  await api("POST", "/products", product({ name: "Dupatta", stock: 0 }));
+  const sold = (await api("POST", "/orders", order({ items: [{ name: "Lawn suit", qty: 2, price: 3500, productId: suit.id }] }))).body;
+  const refused = (await api("POST", "/orders", order({ items: [{ name: "Lawn suit", qty: 1, price: 3500, productId: suit.id }] }))).body;
+  const unlinked = (await api("POST", "/orders", order())).body;
+  await api("PATCH", `/orders/${sold.id}`, { status: "delivered" });
+  await api("PATCH", `/orders/${refused.id}`, { status: "returned" });
+  await api("PATCH", `/orders/${unlinked.id}`, { status: "delivered" });
+
+  const { profit, stock } = (await api("GET", "/dashboard")).body;
+  assert.equal(profit.sales, 7250 * 2);
+  assert.equal(profit.itemCost, 4000);
+  assert.equal(profit.courier, 400);
+  assert.equal(profit.returnLoss, 200);
+  assert.equal(profit.profit, 14500 - 4000 - 400 - 200);
+  assert.equal(profit.noCost, 1, "one delivered order has items with no cost price");
+
+  assert.equal(stock.products, 2);
+  assert.equal(stock.pieces, 3);
+  assert.equal(stock.value, 6000);
+  assert.deepEqual([stock.out, stock.low], [1, 1]);
+  assert.deepEqual(stock.alerts.map((p) => p.name), ["Dupatta", "Lawn suit"]);
+});

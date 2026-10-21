@@ -1,11 +1,13 @@
 // In-browser copy of the Node API for the self-contained preview build.
-// Data lives in this browser's localStorage and starts with a demo shop full of sample orders.
+// Data lives in this browser's localStorage and starts with a demo shop full of sample orders and stock.
 import {
   checkOrder, checkStatusChange, checkSettings, newOrder, applyStatus, applyEdit, nextNumber,
   customerList, customerHistory, dashboard, filterOrders, DEFAULT_TEMPLATES,
+  checkProduct, checkStockChange, newProduct, applyProductEdit, applyStockChange, moveStock,
+  sameName, stockDelta, stockHeld, linkItems, productList, productDetail,
 } from "../../../shared/core.js";
 
-const KEY = "sauda-preview-v1";
+const KEY = "sauda-preview-v2";
 let memory = null; // used when localStorage is blocked
 
 function load() {
@@ -44,7 +46,16 @@ async function hash(password) {
   }
 }
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
-const publicUser = (u) => ({ id: u.id, name: u.name, shop: u.shop, email: u.email, templates: u.templates });
+const publicUser = (u) => ({ id: u.id, name: u.name, shop: u.shop, email: u.email, courierCharge: u.courierCharge || 0, templates: u.templates });
+
+// Moves stock for the products an order change touched, like the server does.
+function syncStock(db, before, after) {
+  const order = after || before;
+  for (const [id, change] of stockDelta(before, after)) {
+    const p = db.products.find((x) => x.id === id && x.sellerId === order.sellerId);
+    if (p) moveStock(p, change, "order", { order });
+  }
+}
 
 export async function handle(method, url, body) {
   await new Promise((r) => setTimeout(r, 60));
@@ -56,6 +67,7 @@ export async function handle(method, url, body) {
     if (!user) throw new ApiError(401, "Please log in first.");
   };
   const mine = () => db.orders.filter((o) => o.sellerId === user.id);
+  const myProducts = () => db.products.filter((p) => p.sellerId === user.id);
   const route = `${method} ${pathPart}`;
   let m;
 
@@ -102,8 +114,10 @@ export async function handle(method, url, body) {
   if (route === "POST /orders") {
     const { value, errors } = checkOrder(body);
     if (errors) invalid(errors);
+    value.items = linkItems(value.items, myProducts());
     const o = newOrder(value, { id: uid(), number: nextNumber(mine()), sellerId: user.id });
     db.orders.push(o);
+    syncStock(db, null, o);
     save(db);
     return o;
   }
@@ -113,12 +127,15 @@ export async function handle(method, url, body) {
     if (method === "GET") return o;
     if (method === "DELETE") {
       db.orders = db.orders.filter((x) => x !== o);
+      syncStock(db, o, null);
       save(db);
       return { ok: true };
     }
     const { value, errors } = method === "PUT" ? checkOrder(body) : checkStatusChange(body);
     if (errors) invalid(errors);
-    method === "PUT" ? applyEdit(o, value) : applyStatus(o, value);
+    const before = structuredClone(o);
+    method === "PUT" ? applyEdit(o, { ...value, items: linkItems(value.items, myProducts(), o.items) }) : applyStatus(o, value);
+    syncStock(db, before, o);
     save(db);
     return o;
   }
@@ -128,7 +145,40 @@ export async function handle(method, url, body) {
     if (!h) invalid({ phone: "Enter a Pakistani mobile number, like 0300 1234567." });
     return h;
   }
-  if (route === "GET /dashboard") return dashboard(mine());
+  if (route === "GET /dashboard") return dashboard(mine(), { products: myProducts(), courierCharge: user.courierCharge || 0 });
+
+  const nameTaken = (name) => invalid({ name: `You already have a product called "${name}".` });
+  if (route === "GET /products") return productList(myProducts(), mine());
+  if (route === "POST /products") {
+    const { value, errors } = checkProduct(body, { isNew: true });
+    if (errors) invalid(errors);
+    if (myProducts().some((p) => sameName(p.name, value.name))) nameTaken(value.name);
+    const p = newProduct(value, { id: uid(), sellerId: user.id });
+    db.products.push(p);
+    save(db);
+    return productDetail(p);
+  }
+  if ((m = pathPart.match(/^\/products\/([^/]+)(\/stock)?$/))) {
+    const p = myProducts().find((x) => x.id === m[1]);
+    if (!p) throw new ApiError(404, "Product not found.");
+    if (m[2] && method !== "POST") throw new ApiError(404, "Not found.");
+    if (m[2]) {
+      const { value, errors } = checkStockChange(body);
+      if (errors) invalid(errors);
+      applyStockChange(p, value);
+    } else if (method === "PUT") {
+      const { value, errors } = checkProduct(body);
+      if (errors) invalid(errors);
+      if (myProducts().some((x) => x !== p && sameName(x.name, value.name))) nameTaken(value.name);
+      applyProductEdit(p, value);
+    } else if (method === "DELETE") {
+      db.products = db.products.filter((x) => x !== p);
+      save(db);
+      return { ok: true };
+    } else if (method !== "GET") throw new ApiError(404, "Not found.");
+    save(db);
+    return productDetail(p, mine());
+  }
   throw new ApiError(404, "Not found.");
 }
 
@@ -149,14 +199,15 @@ function seed() {
     ["Rawalpindi", "Satellite Town, B Block, House 190"], ["Faisalabad", "Madina Town, Street 3, House 55"], ["Multan", "Gulgasht Colony, House 12"],
     ["Sialkot", "Model Town, House 7"], ["Peshawar", "Hayatabad Phase 3, Street 8"], ["Gujranwala", "Satellite Town, House 31"],
   ];
+  // Name, price, cost, and the stock left today (a couple running low, one sold out).
   const products = [
-    ["Lawn 3-piece suit", 4500], ["Embroidered kurta", 3200], ["Chiffon dupatta", 1500], ["Khussa (pair)", 2200],
-    ["Silk scarf", 1200], ["Kids frock", 1800], ["Printed shawl", 2800], ["Cotton trouser", 1400],
+    ["Lawn 3-piece suit", 4500, 2900, 14], ["Embroidered kurta", 3200, 1900, 9], ["Chiffon dupatta", 1500, 800, 2], ["Khussa (pair)", 2200, 1300, 0],
+    ["Silk scarf", 1200, 650, 18], ["Kids frock", 1800, 1050, 6], ["Printed shawl", 2800, 1700, 3], ["Cotton trouser", 1400, 800, 11],
   ];
   const couriers = ["TCS", "Leopards", "M&P", "PostEx", "Trax"];
   const sources = ["Instagram", "Instagram", "Instagram", "Facebook", "WhatsApp", "TikTok"];
 
-  const demo = { id: "demo", name: "Noor Fatima", shop: "Noor Boutique", email: DEMO_LOGIN.email, passwordHash: DEMO_HASH, templates: { ...DEFAULT_TEMPLATES }, createdAt: new Date().toISOString() };
+  const demo = { id: "demo", name: "Noor Fatima", shop: "Noor Boutique", email: DEMO_LOGIN.email, passwordHash: DEMO_HASH, courierCharge: 220, templates: { ...DEFAULT_TEMPLATES }, createdAt: new Date().toISOString() };
 
   // Customers: some come back, a few refuse parcels.
   const customers = Array.from({ length: 22 }, (_, i) => {
@@ -172,8 +223,9 @@ function seed() {
     const created = new Date(now - ageDays * 864e5).toISOString();
     const items = [];
     for (let k = 1 + Math.floor(rand() * 2.2); k > 0; k--) {
-      const [name, price] = pick(products);
-      if (!items.some((it) => it.name === name)) items.push({ name, qty: rand() < 0.2 ? 2 : 1, price });
+      const p = Math.floor(rand() * products.length);
+      const [name, price, cost] = products[p];
+      if (!items.some((it) => it.name === name)) items.push({ name, qty: rand() < 0.2 ? 2 : 1, price, productId: `demo-p${p}`, cost });
     }
     const subtotal = items.reduce((s, it) => s + it.qty * it.price, 0);
     const delivery = subtotal >= 5000 ? 0 : 250;
@@ -193,7 +245,17 @@ function seed() {
     orders.push(o);
   }
 
-  const db = { users: [demo], orders, session: demo.id };
+  // Stock: what was bought 40 days ago, less what the orders still hold, oldest order first.
+  const stock = products.map(([name, price, cost, left], p) => {
+    const held = orders.reduce((s, o) => s + (stockHeld(o).get(`demo-p${p}`) || 0), 0);
+    const opened = new Date(now - 40 * 864e5).toISOString();
+    return newProduct({ name, price, cost, lowStock: 3, stock: left + held }, { id: `demo-p${p}`, sellerId: demo.id, now: opened });
+  });
+  for (const o of [...orders].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    for (const [id, qty] of stockHeld(o)) moveStock(stock.find((p) => p.id === id), -qty, "order", { now: o.createdAt, order: o });
+  }
+
+  const db = { users: [demo], orders, products: stock, session: demo.id };
   save(db);
   return db;
 }

@@ -8,7 +8,7 @@ import Icon from "../components/Icon.vue";
 
 useTitle(() => "Settings");
 const router = useRouter();
-const form = reactive({ shop: app.user.shop, name: app.user.name, templates: { ...app.user.templates } });
+const form = reactive({ shop: app.user.shop, name: app.user.name, courierCharge: app.user.courierCharge || 0, templates: { ...app.user.templates } });
 const fields = ref({});
 const busy = ref(false);
 
@@ -88,6 +88,10 @@ async function resetDemo() {
         <label class="field" :class="{ bad: fields.name }">Your name
           <input v-model="form.name" />
           <span v-if="fields.name" class="err">{{ fields.name }}</span>
+        </label>
+        <label class="field" :class="{ bad: fields.courierCharge }">Courier charge per parcel (Rs) <small>What your courier charges you. Used to work out your profit.</small>
+          <input v-model.number="form.courierCharge" type="number" inputmode="numeric" min="0" class="num" />
+          <span v-if="fields.courierCharge" class="err">{{ fields.courierCharge }}</span>
         </label>
       </div>
     </section>
