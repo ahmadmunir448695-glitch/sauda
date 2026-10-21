@@ -12,6 +12,8 @@ Built with **Vue 3 + Vite** on the front end and **Node.js (Express)** on the ba
 - **Order steps**: New → Confirmed → Shipped (courier + tracking) → Delivered, or Returned / Cancelled, with a history of every change.
 - **Dashboard**: orders today, orders waiting for confirmation, cash still with couriers, sales this month, return rate and a 14-day chart.
 - **Customers**: everyone who ordered, with orders, deliveries, returns and total spent. Search, sort by most returns, and message them on WhatsApp.
+- **Stock and cost book**: list what you sell with its selling price, cost price and pieces in stock. Type a product's name on an order and its price fills in. Its pieces then come out of stock by themselves and go back if the order is cancelled or returned. Add new stock, take pieces out, or set the count after counting. Every change is kept in the product's stock history. Products running low or sold out are flagged on the dashboard.
+- **Real profit**: each order remembers what its items cost on the day it was placed. The dashboard shows this month's profit: delivered sales, less cost of items, less your courier charge per parcel (set in Settings), less the courier charge lost on returned parcels. Each order shows its own profit too.
 - **Private per seller**: each seller has an account and only ever sees their own orders and customers.
 - Works on phones first (bottom tab bar, big buttons), with a sidebar on computers.
 
@@ -45,13 +47,13 @@ Run it behind HTTPS in production: login cookies are marked `Secure` when `NODE_
 
 ```
 shared/core.js          Order rules used by both server and preview: phone numbers, checks,
-                        customer history, dashboard numbers, WhatsApp message templates
+                        customer history, stock and profit, dashboard numbers, WhatsApp message templates
 server/src/app.js       API routes
 server/src/auth.js      Password hashing (scrypt), signed session cookies, login limits
-server/src/storage.js   Small JSON-file store with atomic writes
+server/src/storage.js   Small JSON-file store with atomic writes (users, orders, products)
 server/test/            API tests
-client/src/views/       Pages: Login, Dashboard, Orders, Order, New/Edit order, Customers, Settings
-client/src/components/  Navigation, order row, status pill, returns badge, icons
+client/src/views/       Pages: Login, Dashboard, Orders, Order, New/Edit order, Stock, Product, Customers, Settings
+client/src/components/  Navigation, order row, status pill, returns badge, stock badge, icons
 client/src/lib/         API client, app state, formatting, in-browser preview API
 ```
 
@@ -63,11 +65,16 @@ All routes except the `auth` ones need a logged-in seller, and only touch that s
 | --- | --- | --- |
 | POST | `/api/auth/register`, `/api/auth/login`, `/api/auth/logout` | Accounts |
 | GET | `/api/auth/me` | Current seller |
-| PUT | `/api/settings` | Shop name, your name, WhatsApp messages |
+| PUT | `/api/settings` | Shop name, your name, courier charge per parcel, WhatsApp messages |
 | GET / POST | `/api/orders` | List (`?status=`, `?q=`) or add orders |
 | GET / PUT / PATCH / DELETE | `/api/orders/:id` | Read, edit, change status (`{status, courier, tracking}`), delete |
 | GET | `/api/customers`, `/api/customers/:phone` | Customer list, one number's history and returns flag |
-| GET | `/api/dashboard` | Dashboard numbers |
+| GET | `/api/dashboard` | Dashboard numbers, this month's profit and stock alerts |
+| GET / POST | `/api/products` | List (with stock level and pieces sold in 30 days) or add products |
+| GET / PUT / DELETE | `/api/products/:id` | Read (with stock history), edit details, delete |
+| POST | `/api/products/:id/stock` | `{add: 5}` to receive stock, `{add: -2}` to take out, `{count: 8}` after counting |
+
+Order items can carry a `productId`. The server checks it belongs to the seller and stores the product's cost on the item. An order holds its pieces until it's cancelled or returned, and stock moves on every status change, edit or delete. Selling more than you have is allowed (pre-orders) and shows as oversold.
 
 Phone numbers are stored as `03XXXXXXXXX`; `0300 1234567`, `+92 300 1234567` and `923001234567` are all accepted.
 
@@ -77,11 +84,11 @@ Phone numbers are stored as `03XXXXXXXXX`; `0300 1234567`, `+92 300 1234567` and
 npm test
 ```
 
-Covers accounts, login blocking, order checks and totals, seller privacy, status changes, the returns flag, search and the dashboard.
+Covers accounts, login blocking, order checks and totals, seller privacy, status changes, the returns flag, search, the dashboard, products, stock moving with orders, and profit.
 
 ## Preview build
 
-`npm run build:preview` makes a self-contained copy in `client/dist-preview` that runs without the server, with a demo shop (**demo@sauda.pk / demo1234**) full of sample orders. Everything is saved in the visitor's browser only. It's for showing the app; use `npm run build` + `npm start` for real use.
+`npm run build:preview` makes a self-contained copy in `client/dist-preview` that runs without the server, with a demo shop (**demo@sauda.pk / demo1234**) full of sample orders and stock. Everything is saved in the visitor's browser only. It's for showing the app; use `npm run build` + `npm start` for real use.
 
 ## Font
 

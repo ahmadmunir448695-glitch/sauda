@@ -8,6 +8,7 @@ import { money, shortDay } from "../lib/format.js";
 import { STATUSES, STATUS_LABELS, fillTemplate, waLink } from "../../../shared/core.js";
 import Icon from "../components/Icon.vue";
 import OrderRow from "../components/OrderRow.vue";
+import StockBadge from "../components/StockBadge.vue";
 
 useTitle(() => "Dashboard");
 const stats = ref(null);
@@ -96,6 +97,24 @@ async function markConfirmed(o) {
             </li>
           </ul>
         </section>
+
+        <section class="card">
+          <div class="card-head"><h2>Profit this month</h2><RouterLink v-if="!stats.profit.courierCharge" to="/settings">Add courier charge</RouterLink></div>
+          <div v-if="!stats.profit.sales && !stats.profit.returnLoss" class="small muted">Your profit shows here once orders are delivered this month.</div>
+          <template v-else>
+            <div class="totals profit-box" style="margin-top:0">
+              <div><span>Sales delivered</span><span class="num">{{ money(stats.profit.sales) }}</span></div>
+              <div><span>Cost of items</span><span class="num">− {{ money(stats.profit.itemCost) }}</span></div>
+              <div v-if="stats.profit.courier"><span>Courier charges</span><span class="num">− {{ money(stats.profit.courier) }}</span></div>
+              <div v-if="stats.profit.returnLoss"><span>Lost on returns</span><span class="num loss">− {{ money(stats.profit.returnLoss) }}</span></div>
+              <div class="grand"><span>Profit</span><span class="num" :class="{ loss: stats.profit.profit < 0 }">{{ money(stats.profit.profit) }}</span></div>
+            </div>
+            <p v-if="stats.profit.noCost" class="small muted" style="margin-top:10px">
+              {{ stats.profit.noCost }} delivered order{{ stats.profit.noCost === 1 ? " has" : "s have" }} items that aren't in your <RouterLink to="/stock">stock list</RouterLink>, so their cost isn't counted and profit looks higher than it is.
+            </p>
+            <p v-if="!stats.profit.courierCharge" class="small muted" style="margin-top:10px">Add what your courier charges you per parcel in <RouterLink to="/settings">Settings</RouterLink> to count it.</p>
+          </template>
+        </section>
       </div>
 
       <div class="dash-col">
@@ -110,6 +129,23 @@ async function markConfirmed(o) {
           <div class="chart-days" aria-hidden="true">
             <span v-for="(d, i) in stats.days" :key="d.day">{{ i === stats.days.length - 1 ? "Today" : shortDay(d.day) }}</span>
           </div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>Stock</h2><RouterLink to="/stock">Open stock</RouterLink></div>
+          <div v-if="!stats.stock.products" class="empty" style="padding:12px 10px">
+            <span>Add what you sell with what it costs you to track stock and see your real profit.</span>
+            <RouterLink to="/stock/new" class="btn btn-ghost btn-sm"><Icon name="plus" />Add a product</RouterLink>
+          </div>
+          <template v-else>
+            <p class="small muted">{{ stats.stock.pieces }} pieces worth {{ money(stats.stock.value) }} at cost</p>
+            <ul v-if="stats.stock.alerts.length" class="stock-alerts">
+              <li v-for="p in stats.stock.alerts" :key="p.id"><RouterLink :to="`/stock/${p.id}`">{{ p.name }}</RouterLink><StockBadge :product="p" /></li>
+            </ul>
+            <p v-else class="small" style="margin-top:8px;font-weight:600;color:var(--s-delivered)">✓ Everything is well stocked</p>
+            <RouterLink v-if="stats.stock.low + stats.stock.out > stats.stock.alerts.length" class="small" to="/stock">
+              See all {{ stats.stock.low + stats.stock.out }} that need restocking
+            </RouterLink>
+          </template>
         </section>
         <section class="card">
           <div class="card-head"><h2>All orders by status</h2><RouterLink to="/orders">Open list</RouterLink></div>

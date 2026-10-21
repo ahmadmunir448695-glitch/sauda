@@ -1,5 +1,5 @@
 // Order rules shared by the Node server and the in-browser preview:
-// phone numbers, order checks, customer history, dashboard numbers and WhatsApp messages.
+// phone numbers, order checks, customer history, stock and profit, dashboard numbers and WhatsApp messages.
 
 export const STATUSES = ["new", "confirmed", "shipped", "delivered", "returned", "cancelled"];
 export const STATUS_LABELS = {
@@ -66,11 +66,12 @@ export function checkOrder(body = {}) {
     const iname = str(it?.name);
     const qty = int(it?.qty);
     const price = int(it?.price);
+    const productId = typeof it?.productId === "string" && it.productId.length <= 64 ? it.productId : "";
     if (!iname && !it?.price) return; // blank row
     if (iname.length < 1 || iname.length > 80) errors[`item${i}`] = "Enter what the customer ordered.";
     else if (!Number.isInteger(qty) || qty < 1 || qty > 99) errors[`item${i}`] = "Quantity must be 1 to 99.";
     else if (!Number.isInteger(price) || price < 0 || price > 10_000_000) errors[`item${i}`] = "Enter the price in rupees.";
-    else items.push({ name: iname, qty, price });
+    else items.push({ name: iname, qty, price, ...(productId ? { productId } : {}) });
   });
   if (!items.length && !Object.keys(errors).some((k) => k.startsWith("item"))) errors.items = "Add at least one item.";
   if (items.length > 20) errors.items = "An order can have up to 20 items.";
@@ -107,6 +108,8 @@ export function checkSettings(body = {}) {
   const name = str(body.name);
   if (shop.length < 2 || shop.length > 40) errors.shop = "Enter your shop name.";
   if (name.length < 2 || name.length > 60) errors.name = "Enter your name.";
+  const courierCharge = body.courierCharge === undefined || body.courierCharge === "" ? 0 : int(body.courierCharge);
+  if (!Number.isInteger(courierCharge) || courierCharge < 0 || courierCharge > 5000) errors.courierCharge = "Enter the courier charge, 0 to 5,000.";
   const templates = {};
   for (const k of TEMPLATE_KEYS) {
     const t = typeof body.templates?.[k] === "string" ? body.templates[k].trim() : "";
@@ -114,7 +117,7 @@ export function checkSettings(body = {}) {
     templates[k] = t;
   }
   if (Object.keys(errors).length) return { errors };
-  return { value: { shop, name, templates } };
+  return { value: { shop, name, courierCharge, templates } };
 }
 
 export function newOrder(value, { id, number, sellerId, now = new Date().toISOString() }) {
@@ -181,13 +184,12 @@ export function customerHistory(orders, phone) {
 }
 
 // ---------- Dashboard ----------
-export function dashboard(orders, now = new Date()) {
+// `products` and `courierCharge` (what the courier charges the seller per parcel) feed the stock and profit numbers.
+export function dashboard(orders, { products = [], courierCharge = 0, now = new Date() } = {}) {
   const today = pkDay(now);
-  const month = today.slice(0, 7);
   const active = orders.filter((o) => o.status !== "cancelled");
   const count = (s) => orders.filter((o) => o.status === s).length;
-  const deliveredMonth = orders.filter((o) => o.status === "delivered" && lastChange(o, "delivered").slice(0, 7) === month);
-  const returnedMonth = orders.filter((o) => o.status === "returned" && lastChange(o, "returned").slice(0, 7) === month);
+  const { deliveredMonth, returnedMonth } = finishedThisMonth(orders, now);
   const done = deliveredMonth.length + returnedMonth.length;
 
   // Orders per day for the last 14 days (Pakistan time).
@@ -208,9 +210,171 @@ export function dashboard(orders, now = new Date()) {
     returnedMonth: returnedMonth.length,
     returnRate: done ? Math.round((returnedMonth.length / done) * 100) : 0,
     days,
+    profit: profitSummary(orders, courierCharge, now),
+    stock: stockSummary(products),
   };
 }
 const lastChange = (o, status) => pkDay([...o.history].reverse().find((h) => h.status === status)?.at || o.updatedAt);
+
+// Orders delivered or returned this month (Pakistan time), counted by when that happened.
+function finishedThisMonth(orders, now) {
+  const month = pkDay(now).slice(0, 7);
+  const finished = (s) => orders.filter((o) => o.status === s && lastChange(o, s).slice(0, 7) === month);
+  return { deliveredMonth: finished("delivered"), returnedMonth: finished("returned") };
+}
+
+// ---------- Stock and profit ----------
+// Products are what the seller keeps in stock. Order items can point at one (`productId`),
+// and carry the product's cost from the day of the order, so later price changes don't rewrite old profit.
+export const MOVE_LABELS = { start: "Opening stock", restock: "Stock received", remove: "Taken out", count: "Counted", order: "Order" };
+const MAX_MOVES = 30;
+
+export function checkProduct(body = {}, { isNew = false } = {}) {
+  const errors = {};
+  const name = str(body.name);
+  const price = int(body.price);
+  const cost = int(body.cost);
+  const lowStock = body.lowStock === undefined || body.lowStock === "" ? 3 : int(body.lowStock);
+  if (name.length < 1 || name.length > 80) errors.name = "Enter the product name.";
+  if (!Number.isInteger(price) || price < 0 || price > 10_000_000) errors.price = "Enter the selling price in rupees.";
+  if (!Number.isInteger(cost) || cost < 0 || cost > 10_000_000) errors.cost = "Enter what one piece costs you, in rupees.";
+  if (!Number.isInteger(lowStock) || lowStock < 0 || lowStock > 9999) errors.lowStock = "Enter a number from 0 to 9,999.";
+  const value = { name, price, cost, lowStock };
+  // Stock is only set when adding a product; after that it moves through orders and stock changes.
+  if (isNew) {
+    const stock = body.stock === undefined || body.stock === "" ? 0 : int(body.stock);
+    if (!Number.isInteger(stock) || stock < 0 || stock > 99_999) errors.stock = "Enter how many pieces you have, 0 to 99,999.";
+    value.stock = stock;
+  }
+  if (Object.keys(errors).length) return { errors };
+  return { value };
+}
+
+// `{ add: n }` receives (or with a negative n, takes out) pieces; `{ count: n }` sets the stock after counting.
+export function checkStockChange(body = {}) {
+  if (body.count !== undefined) {
+    const count = int(body.count);
+    if (!Number.isInteger(count) || count < 0 || count > 99_999) return { errors: { qty: "Enter the count, 0 to 99,999." } };
+    return { value: { count } };
+  }
+  const add = int(body.add);
+  if (!Number.isInteger(add) || add === 0 || Math.abs(add) > 99_999) return { errors: { qty: "Enter how many pieces, 1 to 99,999." } };
+  return { value: { add } };
+}
+
+export const sameName = (a, b) => str(a).toLowerCase() === str(b).toLowerCase();
+export const findProduct = (products, name) => (str(name) ? products.find((p) => sameName(p.name, name)) : undefined);
+
+export function newProduct(value, { id, sellerId, now = new Date().toISOString() }) {
+  const p = { id, sellerId, ...value, stock: 0, createdAt: now, updatedAt: now, moves: [] };
+  return moveStock(p, value.stock, "start", { now });
+}
+
+export function applyProductEdit(product, value, now = new Date().toISOString()) {
+  return Object.assign(product, value, { updatedAt: now });
+}
+
+// Changes the stock and logs why, newest first. `order` is set when an order took or gave back the pieces.
+export function moveStock(product, change, reason, { now = new Date().toISOString(), order } = {}) {
+  if (!change) return product;
+  product.stock += change;
+  product.moves.unshift({ at: now, change, stock: product.stock, reason, ...(order ? { orderId: order.id, number: order.number } : {}) });
+  product.moves.length = Math.min(product.moves.length, MAX_MOVES);
+  product.updatedAt = now;
+  return product;
+}
+
+export function applyStockChange(product, { add, count }, now = new Date().toISOString()) {
+  if (count !== undefined) return moveStock(product, count - product.stock, "count", { now });
+  return moveStock(product, add, add > 0 ? "restock" : "remove", { now });
+}
+
+export const stockLevel = (p) => (p.stock <= 0 ? "out" : p.stock <= p.lowStock ? "low" : "ok");
+
+// An order holds its pieces until it is cancelled or returned (a returned parcel comes back to the seller).
+export function stockHeld(order) {
+  const held = new Map();
+  if (!order || order.status === "cancelled" || order.status === "returned") return held;
+  for (const it of order.items) if (it.productId) held.set(it.productId, (held.get(it.productId) || 0) + it.qty);
+  return held;
+}
+
+// How each product's stock changes when an order goes from `before` to `after`.
+// Either may be null (a new or deleted order). Returns [productId, change] pairs.
+export function stockDelta(before, after) {
+  const delta = new Map(stockHeld(before));
+  for (const [id, qty] of stockHeld(after)) delta.set(id, (delta.get(id) || 0) - qty);
+  return [...delta].filter(([, change]) => change);
+}
+
+// Links order items to the seller's products and stamps each with its cost.
+// Unknown products are dropped; a product already on the order keeps the cost it had then.
+export function linkItems(items, products, previous = []) {
+  const byId = new Map(products.map((p) => [p.id, p]));
+  const oldCost = new Map(previous.filter((it) => it.productId).map((it) => [it.productId, it.cost]));
+  return items.map(({ productId, cost, ...it }) => {
+    if (!productId || (!byId.has(productId) && !oldCost.has(productId))) return it;
+    return { ...it, productId, cost: oldCost.has(productId) ? oldCost.get(productId) : byId.get(productId).cost };
+  });
+}
+
+// Cost of an order's items. `known` is false when some item has no cost price.
+export function itemsCost(order) {
+  let cost = 0;
+  let known = true;
+  for (const it of order.items) {
+    if (it.cost === undefined) known = false;
+    else cost += it.cost * it.qty;
+  }
+  return { cost, known };
+}
+
+// This month's profit: delivered sales, less what the items cost, the courier charge on every
+// delivered parcel, and the courier charge lost on every returned one.
+export function profitSummary(orders, courierCharge = 0, now = new Date()) {
+  const { deliveredMonth, returnedMonth } = finishedThisMonth(orders, now);
+  let sales = 0;
+  let itemCost = 0;
+  let noCost = 0;
+  for (const o of deliveredMonth) {
+    const c = itemsCost(o);
+    sales += o.total;
+    itemCost += c.cost;
+    if (!c.known) noCost++;
+  }
+  const courier = courierCharge * deliveredMonth.length;
+  const returnLoss = courierCharge * returnedMonth.length;
+  return { sales, itemCost, courier, returnLoss, profit: sales - itemCost - courier - returnLoss, noCost, courierCharge };
+}
+
+// Products with their stock level and pieces sold in the last 30 days, A to Z.
+export function productList(products, orders = [], now = new Date()) {
+  const since = new Date(now).getTime() - 30 * 864e5;
+  const sold = new Map();
+  for (const o of orders) {
+    if (new Date(o.createdAt).getTime() < since) continue;
+    for (const [id, qty] of stockHeld(o)) sold.set(id, (sold.get(id) || 0) + qty);
+  }
+  return products
+    .map(({ moves, ...p }) => ({ ...p, level: stockLevel(p), sold30: sold.get(p.id) || 0 }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// One product with its stock log.
+export const productDetail = (product, orders = []) => ({ ...productList([product], orders)[0], moves: product.moves });
+
+export function stockSummary(products) {
+  const list = products.map((p) => ({ id: p.id, name: p.name, stock: p.stock, lowStock: p.lowStock, level: stockLevel(p) }));
+  const alerts = list.filter((p) => p.level !== "ok").sort((a, b) => a.stock - b.stock || a.name.localeCompare(b.name));
+  return {
+    products: list.length,
+    pieces: products.reduce((s, p) => s + Math.max(0, p.stock), 0),
+    value: products.reduce((s, p) => s + Math.max(0, p.stock) * p.cost, 0),
+    out: alerts.filter((p) => p.level === "out").length,
+    low: alerts.filter((p) => p.level === "low").length,
+    alerts: alerts.slice(0, 6),
+  };
+}
 
 // ---------- WhatsApp messages ----------
 export function fillTemplate(template, order, shop) {

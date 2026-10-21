@@ -5,7 +5,7 @@ import { api } from "../lib/api.js";
 import { app, toast, useTitle } from "../lib/state.js";
 import { refreshCounts, setStatus } from "../lib/orders.js";
 import { money, fullDate } from "../lib/format.js";
-import { COURIERS, STATUS_LABELS, fillTemplate, prettyPhone, templateFor, waLink } from "../../../shared/core.js";
+import { COURIERS, STATUS_LABELS, fillTemplate, itemsCost, prettyPhone, templateFor, waLink } from "../../../shared/core.js";
 import Icon from "../components/Icon.vue";
 import StatusPill from "../components/StatusPill.vue";
 import RiskBadge from "../components/RiskBadge.vue";
@@ -91,6 +91,9 @@ async function copy() {
 }
 
 const pieces = computed(() => order.value.items.reduce((s, i) => s + i.qty, 0));
+// Profit is only shown when every item came from the stock list, so its cost is known.
+const costs = computed(() => itemsCost(order.value));
+const courierCharge = computed(() => app.user.courierCharge || 0);
 const steps = ["new", "confirmed", "shipped", "delivered"];
 const reached = computed(() => {
   const o = order.value;
@@ -175,6 +178,17 @@ const failed = computed(() => ["returned", "cancelled"].includes(order.value?.st
             </tbody>
           </table>
           <div class="totals" style="margin-top:12px"><div class="grand" style="border:0;padding:0"><span>Cash to collect</span><span class="num">{{ money(order.total) }}</span></div></div>
+          <div v-if="order.status === 'returned' && courierCharge" class="totals profit-box small">
+            <div><span>Returned: the pieces are back in stock, but the courier charge is lost</span><span class="num loss">− {{ money(courierCharge) }}</span></div>
+          </div>
+          <div v-else-if="costs.known && order.status !== 'cancelled' && order.status !== 'returned'" class="totals profit-box small">
+            <div><span>Cost of items</span><span class="num">− {{ money(costs.cost) }}</span></div>
+            <div v-if="courierCharge"><span>Courier charge</span><span class="num">− {{ money(courierCharge) }}</span></div>
+            <div class="grand">
+              <span>{{ order.status === "delivered" ? "Your profit" : "Profit if delivered" }}</span>
+              <span class="num" :class="{ loss: order.total - costs.cost - courierCharge < 0 }">{{ money(order.total - costs.cost - courierCharge) }}</span>
+            </div>
+          </div>
           <p v-if="order.note" class="small" style="margin-top:12px"><b>Note:</b> {{ order.note }}</p>
         </section>
 

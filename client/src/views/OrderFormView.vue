@@ -5,7 +5,7 @@ import { api } from "../lib/api.js";
 import { toast, useTitle } from "../lib/state.js";
 import { refreshCounts } from "../lib/orders.js";
 import { money, when } from "../lib/format.js";
-import { CITIES, normalizePhone } from "../../../shared/core.js";
+import { CITIES, findProduct, normalizePhone, stockHeld } from "../../../shared/core.js";
 import Icon from "../components/Icon.vue";
 import StatusPill from "../components/StatusPill.vue";
 
@@ -27,15 +27,44 @@ const fields = ref({});
 const error = ref("");
 const busy = ref(false);
 const loaded = ref(!props.id);
+// Pieces this order already holds, so editing it doesn't count them as missing from stock.
+const held = ref(new Map());
 
 if (props.id) {
   api("GET", `/orders/${props.id}`)
     .then((o) => {
       Object.assign(form, { customer: { ...o.customer }, items: o.items.map((i) => ({ ...i })), delivery: o.delivery, source: o.source, note: o.note });
       number.value = o.number;
+      held.value = stockHeld(o);
       loaded.value = true;
     })
     .catch((err) => (error.value = err.message));
+}
+
+// Items typed with a product's name are linked to it: the price fills in and stock is tracked.
+const products = ref([]);
+api("GET", "/products").then((l) => (products.value = l)).catch(() => {});
+
+function matchProduct(it) {
+  const p = findProduct(products.value, it.name);
+  const prev = products.value.find((x) => x.id === it.productId);
+  if (!p) return delete it.productId;
+  if (p.id === it.productId) return;
+  // Switching products updates the price, unless it was changed by hand.
+  if (it.price === "" || (prev && it.price === prev.price)) it.price = p.price;
+  it.productId = p.id;
+}
+
+function stockNote(it) {
+  const p = it.productId && products.value.find((x) => x.id === it.productId);
+  if (!p) return null;
+  const available = p.stock + (held.value.get(p.id) || 0);
+  const wanted = form.items.filter((x) => x.productId === p.id).reduce((s, x) => s + (Number(x.qty) || 0), 0);
+  const each = (Number(it.price) || 0) - (it.cost ?? p.cost);
+  const profit = ` · you make ${money(each)} on each`;
+  if (available <= 0) return { level: "out", text: "Sold out. You can still take it as a pre-order." };
+  if (wanted > available) return { level: "out", text: `Only ${available} in stock.` };
+  return { level: available - wanted <= p.lowStock ? "low" : "ok", text: `${available} in stock${profit}` };
 }
 
 const subtotal = computed(() => form.items.reduce((s, i) => s + (Number(i.qty) || 0) * (Number(i.price) || 0), 0));
@@ -156,13 +185,15 @@ async function save() {
         <div class="item-row item-head" aria-hidden="true"><span>Item</span><span>Qty</span><span>Price (Rs)</span><span></span></div>
         <template v-for="(it, i) in form.items" :key="i">
           <div class="item-row">
-            <input v-model="it.name" class="input" :class="{ bad: fields[`item${i}`] }" :aria-label="`Item ${i + 1}`" placeholder="e.g. Lawn 3-piece suit" />
+            <input v-model="it.name" class="input" :class="{ bad: fields[`item${i}`] }" :aria-label="`Item ${i + 1}`" placeholder="e.g. Lawn 3-piece suit" :list="products.length ? 'products' : null" autocomplete="off" @input="matchProduct(it)" />
             <input v-model.number="it.qty" class="input num" type="number" inputmode="numeric" min="1" max="99" :aria-label="`Quantity for item ${i + 1}`" />
             <input v-model.number="it.price" class="input num" type="number" inputmode="numeric" min="0" placeholder="0" :aria-label="`Price for item ${i + 1}`" />
             <button type="button" class="icon-btn" :aria-label="`Remove item ${i + 1}`" @click="removeItem(i)"><Icon name="x" /></button>
           </div>
           <span v-if="fields[`item${i}`]" class="err">{{ fields[`item${i}`] }}</span>
+          <span v-else-if="stockNote(it)" class="stock-note" :class="stockNote(it).level">{{ stockNote(it).text }}</span>
         </template>
+        <datalist id="products"><option v-for="p in products" :key="p.id" :value="p.name">{{ money(p.price) }} · {{ p.stock > 0 ? `${p.stock} in stock` : "sold out" }}</option></datalist>
         <span v-if="fields.items" class="err">{{ fields.items }}</span>
         <button type="button" class="btn btn-ghost btn-sm add-item" @click="form.items.push(blankItem())"><Icon name="plus" />Add another item</button>
       </div>
